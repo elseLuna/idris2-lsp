@@ -15,12 +15,16 @@ import Idris.REPL.Opts
 import Idris.Syntax
 import Language.JSON.Data
 import Language.LSP.Completion.Info
+import Language.LSP.Hover
+import Language.LSP.Hover
 import Language.LSP.Message
+import Language.LSP.Message.Markup
 import Language.LSP.Utils
 import Language.LSP.VirtualDocument
 import Libraries.Data.NameMap
 import Libraries.Data.UserNameMap
 import Libraries.Data.WithDefault
+import Libraries.Text.PrettyPrint.Prettyprinter.Render.String
 import Server.Configuration
 import Server.Log
 import Server.Utils
@@ -88,8 +92,9 @@ completionNames : Ref Ctxt Defs
                => Ref LSPConf LSPConfiguration
                => Ref Syn SyntaxInfo
                => Ref ROpts REPLOpts
-               => Core (SortedMap NameCategory (List Entry))
-completionNames = do
+               => Bool
+               -> Core (SortedMap NameCategory (List Entry))
+completionNames supportsMarkup = do
   defs <- get Ctxt
   let ctxt = gamma defs
   let namespaces = sort $ nub (currentNS defs :: nestedNS defs ++ map (snd . snd) (imported defs))
@@ -115,14 +120,19 @@ completionNames = do
             if visible
               then do
                 ty <- prettyType (const ()) def.type
-                doc <- getDocsForName def.location def.fullname config
+                conf <- get LSPConf
+                mdDoc <- getMarkdownDocsForName def.location def.fullname config
+                plainDoc <- getDocsForName def.location def.fullname config
+                let doc = if supportsMarkup
+                            then MkMarkupContent Markdown $ renderMDString $ layoutUnbounded mdDoc
+                            else MkMarkupContent PlainText $ renderString $ layoutUnbounded plainDoc
                 pure $ Just $
                   MkEntry
                     { category      = categorizeName (ns, un, n)
                     , fullname      = def.fullname
                     , type          = show ty
                     , arguments     = arguments def.type
-                    , documentation = show doc
+                    , documentation = doc
                     }
               else pure Nothing)
     inImportedNamespaces

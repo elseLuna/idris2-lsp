@@ -45,6 +45,7 @@ import Language.LSP.Completion.Info
 import Language.LSP.Definition
 import Language.LSP.DocumentHighlight
 import Language.LSP.DocumentSymbol
+import Language.LSP.Hover
 import Language.LSP.Message
 import Language.LSP.Metavars
 import Language.LSP.SignatureHelp
@@ -259,7 +260,8 @@ loadURI conf uri version = do
   sendDiagnostics caps uri version warnings errs
   defs <- get Ctxt
   put Ctxt ({ options->dirs->extra_dirs := extraDirs } defs)
-  cNames <- completionNames
+  let supportsMarkup = maybe False (Markdown `elem`) $ conf.capabilities.textDocument >>= .hover >>= .contentFormat
+  cNames <- completionNames supportsMarkup
   update LSPConf ({completionCache $= insert uri cNames})
   pure $ Right ()
 
@@ -376,6 +378,9 @@ handleRequest TextDocumentHover params = whenActiveRequest $ \conf => do
     let Just (loc, name) = findPointInTreeLoc (cast params.position) nameLocs
       | Nothing => pure $ pure $ make $ MkNull
     logD Hover "Found name \{show name}"
+    
+    let supportsMarkup = maybe False (Markdown `elem`) $ conf.capabilities.textDocument >>= .hover >>= .contentFormat
+
     -- Lookup the name globally
     globals <- lookupCtxtName name (gamma defs)
     globalResult <- the (Core $ Maybe $ Doc IdrisAnn) $ case globals of
@@ -383,17 +388,28 @@ handleRequest TextDocumentHover params = whenActiveRequest $ \conf => do
       ts => do tys <- traverse (displayType defs) ts
                pure $ Just (vsep tys)
     localResult <- findTypeAt $ anyWithName name $ within (cast params.position)
-    line <- case (globalResult, localResult) of
+    docResult <- (flip catch) (\_ => pure Nothing) $ do
+      doc <- if supportsMarkup
+        then getMarkdownDocsForName (MkFC (fst loc) (fst $ snd loc) (snd $ snd loc)) name MkConfig
+        else pure $ annotate MDRaw $ unAnnotate !(getDocsForName (MkFC (fst loc) (fst $ snd loc) (snd $ snd loc)) name MkConfig)
+      pure $ the (Maybe (Doc MarkdownAnn)) $ doc <$ guard (not $ null (trim $ renderString $ unAnnotateS $ layoutUnbounded $ doc))
+    
+    
+
+    docStream <- case (globalResult, localResult, docResult) of
       -- Give precedence to the local name, as it shadows the others
-      (_, Just (n, _, type)) => pure $ renderString $ unAnnotateS $ layoutUnbounded $
-                                  pretty0 (nameRoot n) <++> colon <++> !(displayTerm defs type)
-      (Just globalDoc, Nothing) => pure $ renderString $ unAnnotateS $ layoutUnbounded globalDoc
-      (Nothing, Nothing) => pure ""
+      (_, Just (n, _, type), _) => pure $ annotate MDCode $ unAnnotate $ 
+                                     pretty0 (nameRoot n) <++> colon <++> !(displayTerm defs type)
+      (_, Nothing, Just docResult) => pure docResult
+      (Just globalDoc, Nothing, Nothing) => pure $ annotate MDCode $ unAnnotate $ globalDoc
+      (Nothing, Nothing, Nothing) => pure Empty
+    let line = if supportsMarkup
+                  then renderMDString $ layoutUnbounded docStream
+                  else renderString $ unAnnotateS $ layoutUnbounded docStream
     let False = null line
       | True => pure $ pure $ make $ MkNull
-    let supportsMarkup = maybe False (Markdown `elem`) $ conf.capabilities.textDocument >>= .hover >>= .contentFormat
     let markupContent = the MarkupContent $ if supportsMarkup
-                                               then MkMarkupContent Markdown $ "```idris\n\{line}\n```"
+                                               then MkMarkupContent Markdown line
                                                else MkMarkupContent PlainText line
     let hover = MkHover (make markupContent) Nothing
     -- TODO consider reenabling hover caching once locations are accurate

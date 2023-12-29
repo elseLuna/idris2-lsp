@@ -1,6 +1,7 @@
 module Language.LSP.Completion.Info
 
 import Core.Name
+import Language.LSP.Message.Markup
 
 ||| Category for Core.Name
 |||
@@ -40,4 +41,4 @@ record Entry where
   type          : String
   arguments     : List (Maybe String)
   -- List of explicit arguments, when unnamed is Nothing, when user defined is Just str
-  documentation : String
+  documentation : MarkupContent
